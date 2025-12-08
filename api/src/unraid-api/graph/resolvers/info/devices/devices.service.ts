@@ -4,6 +4,7 @@ import { access } from 'fs/promises';
 
 import { execa } from 'execa';
 import { isSymlink } from 'path-type';
+import { networkInterfaces } from 'systeminformation';
 
 import type { PciDevice } from '@app/core/types/index.js';
 import { sanitizeProduct } from '@app/core/utils/vms/domain/sanitize-product.js';
@@ -86,9 +87,26 @@ export class DevicesService {
 
     async generateNetwork(): Promise<InfoNetwork[]> {
         try {
-            // For now, return empty array. This can be implemented later to fetch actual network interfaces
-            // using systeminformation or similar libraries
-            return [];
+            const interfaces = await networkInterfaces();
+
+            // Handle both single object and array responses from systeminformation
+            const interfaceList = Array.isArray(interfaces) ? interfaces : [interfaces];
+
+            // Filter out internal interfaces (like loopback)
+            const physicalInterfaces = interfaceList.filter(
+                (iface) => !iface.internal && iface.iface
+            );
+
+            return physicalInterfaces.map((iface) => ({
+                id: `network/${iface.iface}`,
+                iface: iface.iface,
+                model: iface.type || undefined,
+                vendor: undefined, // Not available from systeminformation
+                mac: iface.mac || undefined,
+                virtual: iface.virtual || false,
+                speed: iface.speed ? `${iface.speed} Mbit/s` : undefined,
+                dhcp: iface.dhcp || false,
+            }));
         } catch (error: unknown) {
             this.logger.error(
                 `Failed to generate network devices: ${error instanceof Error ? error.message : String(error)}`,
