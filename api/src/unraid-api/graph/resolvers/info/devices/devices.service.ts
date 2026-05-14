@@ -201,6 +201,27 @@ export class DevicesService {
                 })
             );
 
+            // In typical Unraid setups the IP lives on a user bridge (br0) that's
+            // built on top of a bond/NIC we DO expose. Walk every user bridge and
+            // propagate its IP down to each brif port so bond0/eth surface the
+            // LAN address the user actually cares about rather than reporting
+            // null on an interface that's plainly carrying traffic.
+            const isUserBridge = (n: string): boolean =>
+                n.startsWith('br') && !/^br-[a-f0-9]+$/.test(n);
+            const inheritedIp = new Map<string, string>();
+            await Promise.all(
+                allIfaces.filter(isUserBridge).map(async (bridge) => {
+                    const bridgeIp = sysInfoByIface.get(bridge)?.ip4;
+                    if (!bridgeIp) return;
+                    const ports = await readdir(`/sys/class/net/${bridge}/brif`).catch(
+                        () => [] as string[]
+                    );
+                    for (const port of ports) {
+                        if (!inheritedIp.has(port)) inheritedIp.set(port, bridgeIp);
+                    }
+                })
+            );
+
             const deriveType = (name: string): string => {
                 if (name === 'lo') return 'loopback';
                 if (/^(eth|em|ens|enp|en\d)/.test(name)) return 'ethernet';
@@ -248,6 +269,9 @@ export class DevicesService {
                         );
                         speedRaw = Number.isFinite(sr) ? sr : null;
                     }
+                    // Surface the upstream bridge's IP (e.g. br0 -> bond0) when
+                    // the interface has no IP of its own.
+                    if (!ip4) ip4 = inheritedIp.get(name);
                     const t1 = trafficSnapshot1.get(name);
                     const t2 = trafficSnapshot2.get(name);
                     const pci = pciMap.get(name);
