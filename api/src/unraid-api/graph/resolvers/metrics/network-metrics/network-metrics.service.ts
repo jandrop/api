@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { readFile } from 'fs/promises';
+import { readdir, readFile } from 'fs/promises';
 
 import {
     NetworkInterfaceUtilization,
@@ -28,7 +28,9 @@ export class NetworkMetricsService {
      * Read /proc/net/dev, compute per-interface deltas against the last
      * snapshot and return a complete utilization payload.
      *
-     * Virtual Docker interfaces (veth*, br-<hash>, docker0) are filtered out.
+     * Only "real" interfaces (physical NIC, bond, wireless, loopback) are
+     * exposed — bridges, tunnels and Docker virtual interfaces are filtered out
+     * to mirror what Unraid's web UI shows.
      */
     async generateNetworkLoad(): Promise<NetworkUtilization> {
         const raw = await readFile('/proc/net/dev', 'utf8').catch((err) => {
@@ -41,7 +43,7 @@ export class NetworkMetricsService {
         const interfaces: NetworkInterfaceUtilization[] = [];
 
         for (const [iface, sample] of current.entries()) {
-            if (this.isDockerVirtualInterface(iface)) continue;
+            if (!(await this.isRealInterface(iface))) continue;
 
             const previous = this.previousSnapshot.get(iface);
             let rxBytesPerSec = 0;
@@ -88,7 +90,18 @@ export class NetworkMetricsService {
         return map;
     }
 
-    private isDockerVirtualInterface(name: string): boolean {
-        return name.startsWith('veth') || /^br-[a-f0-9]+$/.test(name) || name === 'docker0';
+    /**
+     * Mirrors the filter Unraid's web UI applies: keep physical NICs (have a
+     * `device` link), bonds (have a `bonding` dir), wireless adapters and the
+     * loopback. Bridges, tunnels and Docker virtual interfaces are skipped.
+     */
+    private async isRealInterface(name: string): Promise<boolean> {
+        if (name === 'lo') return true;
+        const entries = await readdir(`/sys/class/net/${name}`).catch(() => [] as string[]);
+        return (
+            entries.includes('device') ||
+            entries.includes('bonding') ||
+            entries.includes('wireless')
+        );
     }
 }
