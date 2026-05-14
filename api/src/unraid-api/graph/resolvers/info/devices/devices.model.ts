@@ -1,4 +1,4 @@
-import { Field, ObjectType } from '@nestjs/graphql';
+import { Field, Float, ObjectType } from '@nestjs/graphql';
 
 import { Node } from '@unraid/shared/graphql.model.js';
 
@@ -45,6 +45,27 @@ export class InfoNetwork extends Node {
 
     @Field(() => Boolean, { nullable: true, description: 'DHCP enabled flag' })
     dhcp?: boolean;
+
+    @Field(() => String, { nullable: true, description: 'Connection status (connected/disconnected/unknown)' })
+    status?: string;
+
+    @Field(() => String, { nullable: true, description: 'IPv4 address' })
+    ipAddress?: string;
+
+    @Field(() => String, { nullable: true, description: 'Interface type (ethernet/bridge/bond/other)' })
+    type?: string;
+
+    @Field(() => Float, { nullable: true, description: 'Total bytes received since last reset' })
+    rxBytes?: number;
+
+    @Field(() => Float, { nullable: true, description: 'Total bytes transmitted since last reset' })
+    txBytes?: number;
+
+    @Field(() => Float, { nullable: true, description: 'Current receive speed in bytes per second' })
+    rxBytesPerSec?: number;
+
+    @Field(() => Float, { nullable: true, description: 'Current transmit speed in bytes per second' })
+    txBytesPerSec?: number;
 }
 
 @ObjectType({ implements: () => Node })

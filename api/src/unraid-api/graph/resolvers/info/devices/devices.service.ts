@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { access } from 'fs/promises';
+import { access, readdir, readFile } from 'fs/promises';
 
 import { execa } from 'execa';
 import { isSymlink } from 'path-type';
@@ -18,6 +18,10 @@ import {
     InfoPci,
     InfoUsb,
 } from '@app/unraid-api/graph/resolvers/info/devices/devices.model.js';
+import { networkInterfaces } from 'systeminformation';
+
+/** Sample interval in milliseconds used to compute instantaneous network speed. */
+const SPEED_SAMPLE_INTERVAL_MS = 1000;
 
 interface RawUsbDeviceData {
     id: string;
@@ -29,6 +33,11 @@ interface UsbDevice {
     name: string;
     guid: string;
     vendorname?: string;
+}
+
+interface TrafficSample {
+    rxBytes: number;
+    txBytes: number;
 }
 
 @Injectable()
@@ -69,7 +78,7 @@ export class DevicesService {
                 type: device.manufacturer,
                 typeid: device.typeid,
                 vendorname: device.vendorname,
-                vendorid: device.typeid.substring(0, 4), // Extract vendor ID from type ID
+                vendorid: device.typeid.substring(0, 4),
                 productname: device.productname,
                 productid: device.product,
                 blacklisted: device.allowed ? 'true' : 'false',
@@ -86,9 +95,127 @@ export class DevicesService {
 
     async generateNetwork(): Promise<InfoNetwork[]> {
         try {
-            // For now, return empty array. This can be implemented later to fetch actual network interfaces
-            // using systeminformation or similar libraries
-            return [];
+            // Fetch all data sources in parallel
+            const [sysInfoResult, procNetDevResult, lspciResult] = await Promise.allSettled([
+                networkInterfaces(),
+                readFile('/proc/net/dev', 'utf8'),
+                execa('lspci', ['-mm']),
+            ]);
+
+            const interfaces = sysInfoResult.status === 'fulfilled' ? sysInfoResult.value : [];
+
+            // Parse cumulative RX/TX bytes (bytes since last interface reset / boot)
+            const parseTraffic = (raw: string): Map<string, TrafficSample> => {
+                const map = new Map<string, TrafficSample>();
+                for (const line of raw.split('\n').slice(2)) {
+                    const m = line.trim().match(/^(\S+):\s+(\d+)(?:\s+\d+){6}\s+\d+\s+(\d+)/);
+                    if (m) map.set(m[1], { rxBytes: parseFloat(m[2]), txBytes: parseFloat(m[3]) });
+                }
+                return map;
+            };
+
+            const trafficSnapshot1 = procNetDevResult.status === 'fulfilled'
+                ? parseTraffic(procNetDevResult.value)
+                : new Map<string, TrafficSample>();
+
+            // Second /proc/net/dev read after interval to compute instantaneous speed
+            const trafficSnapshot2 = await readFile('/proc/net/dev', 'utf8')
+                .then((raw) => new Promise<Map<string, TrafficSample>>((resolve) => {
+                    setTimeout(() => resolve(parseTraffic(raw)), SPEED_SAMPLE_INTERVAL_MS);
+                }))
+                .catch(() => new Map<string, TrafficSample>());
+
+            // Build lspci vendor/model index keyed by full PCI slot (0000:xx:xx.x)
+            const lspciIndex = new Map<string, { vendor: string; model: string }>();
+            if (lspciResult.status === 'fulfilled') {
+                for (const line of lspciResult.value.stdout.split('\n')) {
+                    const parts: string[] = [];
+                    let m: RegExpExecArray | null;
+                    const re = /"([^"]*)"/g;
+                    while ((m = re.exec(line)) !== null) parts.push(m[1]);
+                    if (parts.length >= 3) {
+                        lspciIndex.set(`0000:${line.split(' ')[0]}`, { vendor: parts[1], model: parts[2] });
+                    }
+                }
+            }
+
+            const filtered = interfaces.filter(
+                (i) =>
+                    !i.iface.startsWith('veth') &&
+                    !/^br-[a-f0-9]+$/.test(i.iface) &&
+                    i.iface !== 'docker0'
+            );
+
+            // Resolve the PCI slot for a (possibly virtual) interface by traversing
+            // bridge -> bond (active_slave for active-backup, first slave otherwise) -> physical NIC
+            const resolvePciSlot = async (name: string, depth = 0): Promise<string | null> => {
+                if (depth > 3) return null;
+                const uevent = await readFile(`/sys/class/net/${name}/device/uevent`, 'utf8').catch(() => '');
+                const slotMatch = uevent.match(/PCI_SLOT_NAME=(.+)/);
+                if (slotMatch) return slotMatch[1].trim();
+                const slaves = await readFile(`/sys/class/net/${name}/bonding/slaves`, 'utf8').catch(() => '');
+                if (slaves.trim()) {
+                    // For active-backup mode, active_slave is the currently forwarding interface
+                    const activeSlave = await readFile(`/sys/class/net/${name}/bonding/active_slave`, 'utf8').catch(() => '');
+                    const target = activeSlave.trim() || slaves.trim().split(/\s+/)[0];
+                    return resolvePciSlot(target, depth + 1);
+                }
+                const brPorts = await readdir(`/sys/class/net/${name}/brif`).catch(() => [] as string[]);
+                if (brPorts.length > 0) {
+                    return resolvePciSlot(brPorts[0], depth + 1);
+                }
+                return null;
+            };
+
+            const pciMap = new Map<string, { vendor: string; model: string }>();
+            await Promise.all(
+                filtered.map(async ({ iface }) => {
+                    const slot = await resolvePciSlot(iface);
+                    const pci = slot ? lspciIndex.get(slot) : undefined;
+                    if (pci) pciMap.set(iface, pci);
+                })
+            );
+
+            const deriveType = (name: string): string => {
+                if (/^(eth|em|ens|enp|en\d)/.test(name)) return 'ethernet';
+                if (name.startsWith('bond')) return 'bond';
+                if (name.startsWith('br')) return 'bridge';
+                return 'other';
+            };
+
+            const mapStatus = (operstate: string): string => {
+                if (operstate === 'up') return 'connected';
+                if (operstate === 'down') return 'disconnected';
+                return 'unknown';
+            };
+
+            return filtered.map((iface) => {
+                const t1 = trafficSnapshot1.get(iface.iface);
+                const t2 = trafficSnapshot2.get(iface.iface);
+                const pci = pciMap.get(iface.iface);
+                const rxBytesPerSec =
+                    t1 && t2 ? Math.max(0, (t2.rxBytes - t1.rxBytes) / (SPEED_SAMPLE_INTERVAL_MS / 1000)) : undefined;
+                const txBytesPerSec =
+                    t1 && t2 ? Math.max(0, (t2.txBytes - t1.txBytes) / (SPEED_SAMPLE_INTERVAL_MS / 1000)) : undefined;
+
+                return {
+                    id: `network/${iface.iface}`,
+                    iface: iface.iface,
+                    model: pci?.model,
+                    vendor: pci?.vendor,
+                    mac: iface.mac || undefined,
+                    virtual: iface.virtual,
+                    speed: iface.speed != null && iface.speed >= 0 ? `${iface.speed} Mbps` : undefined,
+                    dhcp: iface.dhcp,
+                    status: mapStatus(iface.operstate),
+                    ipAddress: iface.ip4 || undefined,
+                    type: deriveType(iface.iface),
+                    rxBytes: t1?.rxBytes,
+                    txBytes: t1?.txBytes,
+                    rxBytesPerSec,
+                    txBytesPerSec,
+                } as InfoNetwork;
+            });
         } catch (error: unknown) {
             this.logger.error(
                 `Failed to generate network devices: ${error instanceof Error ? error.message : String(error)}`,
@@ -216,7 +343,7 @@ export class DevicesService {
                 id: device.id,
                 name: deviceName || '[unnamed device]',
                 guid,
-                vendorname: '', // Will be sanitized later
+                vendorname: '',
             };
         };
 
