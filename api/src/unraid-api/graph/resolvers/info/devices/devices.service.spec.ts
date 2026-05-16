@@ -201,7 +201,7 @@ describe('DevicesService', () => {
                     virtual: false,
                     dhcp: true,
                 },
-            ] as unknown as Awaited<ReturnType<typeof sysinfo.networkInterfaces>>);
+            ] as unknown as Awaited<ReturnType<typeof mockSysinfo.networkInterfaces>>);
             mockExeca.execa.mockResolvedValueOnce({ stdout: '' }); // lspci empty
 
             const result = await service.generateNetwork();
@@ -274,7 +274,7 @@ describe('DevicesService', () => {
                     virtual: false,
                     dhcp: false,
                 },
-            ] as unknown as Awaited<ReturnType<typeof sysinfo.networkInterfaces>>);
+            ] as unknown as Awaited<ReturnType<typeof mockSysinfo.networkInterfaces>>);
             mockExeca.execa.mockResolvedValueOnce({ stdout: '' });
 
             const result = await service.generateNetwork();
@@ -298,9 +298,8 @@ describe('DevicesService', () => {
                 if (p.endsWith('/eth0/speed')) return '2500\n';
                 return '';
             });
-            const sysinfo = await import('systeminformation');
             // systeminformation hides interfaces that are enslaved to a bond.
-            vi.mocked(sysinfo.networkInterfaces).mockResolvedValueOnce([] as never);
+            vi.mocked(mockSysinfo.networkInterfaces).mockResolvedValueOnce([] as never);
             mockExeca.execa.mockResolvedValueOnce({ stdout: '' });
 
             const result = await service.generateNetwork();
