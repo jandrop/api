@@ -3,8 +3,8 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import type Docker from 'dockerode';
 
 import { pubsub, PUBSUB_CHANNEL } from '@app/core/pubsub.js';
-import { getDockerClient } from '@app/unraid-api/graph/resolvers/docker/utils/docker-client.js';
 import { DockerContainerStats } from '@app/unraid-api/graph/resolvers/docker/docker.model.js';
+import { getDockerClient } from '@app/unraid-api/graph/resolvers/docker/utils/docker-client.js';
 
 interface DockerStatsPayload {
     read: string;
@@ -189,8 +189,7 @@ export class DockerStatsService implements OnModuleDestroy {
 /** Standard `docker stats` CPU% formula. */
 function computeCpuPercent(d: DockerStatsPayload): number {
     const cpuDelta = d.cpu_stats.cpu_usage.total_usage - d.precpu_stats.cpu_usage.total_usage;
-    const sysDelta =
-        (d.cpu_stats.system_cpu_usage ?? 0) - (d.precpu_stats.system_cpu_usage ?? 0);
+    const sysDelta = (d.cpu_stats.system_cpu_usage ?? 0) - (d.precpu_stats.system_cpu_usage ?? 0);
     const onlineCpus = d.cpu_stats.online_cpus ?? 1;
     if (sysDelta <= 0 || cpuDelta < 0) return 0;
     return (cpuDelta / sysDelta) * onlineCpus * 100;
@@ -203,9 +202,10 @@ function computeMemoryUsage(d: DockerStatsPayload): number {
     return Math.max(0, usage - cache);
 }
 
-function sumNetworks(
-    networks: Record<string, { rx_bytes?: number; tx_bytes?: number }> | undefined,
-): { rx: number; tx: number } {
+function sumNetworks(networks: Record<string, { rx_bytes?: number; tx_bytes?: number }> | undefined): {
+    rx: number;
+    tx: number;
+} {
     if (!networks) return { rx: 0, tx: 0 };
     let rx = 0;
     let tx = 0;
