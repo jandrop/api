@@ -98,10 +98,6 @@ export class NetworkMetricsService {
     private async isRealInterface(name: string): Promise<boolean> {
         if (name === 'lo') return true;
         const entries = await readdir(`/sys/class/net/${name}`).catch(() => [] as string[]);
-        return (
-            entries.includes('device') ||
-            entries.includes('bonding') ||
-            entries.includes('wireless')
-        );
+        return entries.includes('device') || entries.includes('bonding') || entries.includes('wireless');
     }
 }

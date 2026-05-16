@@ -177,10 +177,16 @@ describe('DevicesService', () => {
         });
 
         const setReaddir = (handler: (path: string) => Promise<string[]> | string[]) => {
-            vi.mocked(mockFs.readdir).mockImplementation(async (p: string) => handler(p) as never);
+            // readdir's overloaded signature has many shapes; we only ever
+            // exercise the "path → string[]" form, so cast to any.
+            (mockFs.readdir as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+                async (p: string) => handler(p)
+            );
         };
         const setReadFile = (handler: (path: string) => Promise<string> | string) => {
-            vi.mocked(mockFs.readFile).mockImplementation(async (p: string) => handler(p) as never);
+            (mockFs.readFile as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+                async (p: string) => handler(p)
+            );
         };
 
         it('returns a real-interface entry built from systeminformation when available', async () => {

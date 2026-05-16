@@ -2,8 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { access, readdir, readFile } from 'fs/promises';
 
+import type { Systeminformation } from 'systeminformation';
 import { execa } from 'execa';
 import { isSymlink } from 'path-type';
+import { networkInterfaces } from 'systeminformation';
 
 import type { PciDevice } from '@app/core/types/index.js';
 import { sanitizeProduct } from '@app/core/utils/vms/domain/sanitize-product.js';
@@ -18,7 +20,6 @@ import {
     InfoPci,
     InfoUsb,
 } from '@app/unraid-api/graph/resolvers/info/devices/devices.model.js';
-import { networkInterfaces } from 'systeminformation';
 
 /** Sample interval in milliseconds used to compute instantaneous network speed. */
 const SPEED_SAMPLE_INTERVAL_MS = 1000;
@@ -115,9 +116,7 @@ export class DevicesService {
                 );
             };
             const realIfaces = (
-                await Promise.all(
-                    allIfaces.map(async (n) => [n, await isRealInterface(n)] as const)
-                )
+                await Promise.all(allIfaces.map(async (n) => [n, await isRealInterface(n)] as const))
             )
                 .filter(([, ok]) => ok)
                 .map(([n]) => n);
@@ -138,8 +137,12 @@ export class DevicesService {
                 execa('lspci', ['-mm']),
             ]);
 
-            const sysInfoByIface = new Map<string, Awaited<ReturnType<typeof networkInterfaces>>[number]>();
-            if (sysInfoResult.status === 'fulfilled') {
+            // `networkInterfaces()` is typed as `T | T[]` via overload
+            // resolution, but the no-args call resolves to the array form
+            // at runtime — name the element type directly so TS doesn't
+            // try to index a union.
+            const sysInfoByIface = new Map<string, Systeminformation.NetworkInterfacesData>();
+            if (sysInfoResult.status === 'fulfilled' && Array.isArray(sysInfoResult.value)) {
                 for (const i of sysInfoResult.value) sysInfoByIface.set(i.iface, i);
             }
 
@@ -167,7 +170,10 @@ export class DevicesService {
                     const re = /"([^"]*)"/g;
                     while ((m = re.exec(line)) !== null) parts.push(m[1]);
                     if (parts.length >= 3) {
-                        lspciIndex.set(`0000:${line.split(' ')[0]}`, { vendor: parts[1], model: parts[2] });
+                        lspciIndex.set(`0000:${line.split(' ')[0]}`, {
+                            vendor: parts[1],
+                            model: parts[2],
+                        });
                     }
                 }
             }
@@ -176,10 +182,14 @@ export class DevicesService {
             // bond.active_slave so vendor/model surface on bond0 itself.
             const resolvePciSlot = async (name: string, depth = 0): Promise<string | null> => {
                 if (depth > 3) return null;
-                const uevent = await readFile(`/sys/class/net/${name}/device/uevent`, 'utf8').catch(() => '');
+                const uevent = await readFile(`/sys/class/net/${name}/device/uevent`, 'utf8').catch(
+                    () => ''
+                );
                 const slotMatch = uevent.match(/PCI_SLOT_NAME=(.+)/);
                 if (slotMatch) return slotMatch[1].trim();
-                const slaves = await readFile(`/sys/class/net/${name}/bonding/slaves`, 'utf8').catch(() => '');
+                const slaves = await readFile(`/sys/class/net/${name}/bonding/slaves`, 'utf8').catch(
+                    () => ''
+                );
                 if (slaves.trim()) {
                     // For active-backup mode, active_slave is the currently forwarding interface
                     const activeSlave = await readFile(
@@ -206,8 +216,7 @@ export class DevicesService {
             // propagate its IP down to each brif port so bond0/eth surface the
             // LAN address the user actually cares about rather than reporting
             // null on an interface that's plainly carrying traffic.
-            const isUserBridge = (n: string): boolean =>
-                n.startsWith('br') && !/^br-[a-f0-9]+$/.test(n);
+            const isUserBridge = (n: string): boolean => n.startsWith('br') && !/^br-[a-f0-9]+$/.test(n);
             const inheritedIp = new Map<string, string>();
             await Promise.all(
                 allIfaces.filter(isUserBridge).map(async (bridge) => {
@@ -291,8 +300,7 @@ export class DevicesService {
                         vendor: pci?.vendor,
                         mac: mac || undefined,
                         virtual,
-                        speed:
-                            speedRaw != null && speedRaw >= 0 ? `${speedRaw} Mbps` : undefined,
+                        speed: speedRaw != null && speedRaw >= 0 ? `${speedRaw} Mbps` : undefined,
                         dhcp,
                         status: mapStatus(operstate),
                         ipAddress: ip4 || undefined,
