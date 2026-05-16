@@ -9,6 +9,7 @@ import { CpuTopologyService } from '@app/unraid-api/graph/resolvers/info/cpu/cpu
 import { CpuService } from '@app/unraid-api/graph/resolvers/info/cpu/cpu.service.js';
 import { MemoryService } from '@app/unraid-api/graph/resolvers/info/memory/memory.service.js';
 import { MetricsResolver } from '@app/unraid-api/graph/resolvers/metrics/metrics.resolver.js';
+import { NetworkMetricsService } from '@app/unraid-api/graph/resolvers/metrics/network-metrics/network-metrics.service.js';
 import { TemperatureConfigService } from '@app/unraid-api/graph/resolvers/metrics/temperature/temperature-config.service.js';
 import {
     TemperatureMetrics,
@@ -33,6 +34,7 @@ describe('MetricsResolver', () => {
     let resolver: MetricsResolver;
     let cpuService: CpuService;
     let memoryService: MemoryService;
+    let networkMetricsService: NetworkMetricsService;
 
     beforeEach(async () => {
         const module: TestingModule = await Test.createTestingModule({
@@ -90,6 +92,23 @@ describe('MetricsResolver', () => {
                     },
                 },
                 {
+                    provide: NetworkMetricsService,
+                    useValue: {
+                        generateNetworkLoad: vi.fn().mockResolvedValue({
+                            id: 'metrics/network',
+                            interfaces: [
+                                {
+                                    iface: 'eth0',
+                                    rxBytes: 1_500_000,
+                                    txBytes: 800_000,
+                                    rxBytesPerSec: 50_000,
+                                    txBytesPerSec: 25_000,
+                                },
+                            ],
+                        }),
+                    },
+                },
+                {
                     provide: SubscriptionTrackerService,
                     useValue: {
                         registerTopic: vi.fn(),
@@ -125,6 +144,7 @@ describe('MetricsResolver', () => {
         resolver = module.get<MetricsResolver>(MetricsResolver);
         cpuService = module.get<CpuService>(CpuService);
         memoryService = module.get<MemoryService>(MemoryService);
+        networkMetricsService = module.get<NetworkMetricsService>(NetworkMetricsService);
     });
 
     describe('metrics', () => {
@@ -166,6 +186,61 @@ describe('MetricsResolver', () => {
         });
     });
 
+    describe('network', () => {
+        it('returns per-interface utilization from the network metrics service', async () => {
+            const result = await resolver.network();
+
+            expect(networkMetricsService.generateNetworkLoad).toHaveBeenCalled();
+            expect(result).toEqual({
+                id: 'metrics/network',
+                interfaces: [
+                    expect.objectContaining({
+                        iface: 'eth0',
+                        rxBytes: 1_500_000,
+                        txBytes: 800_000,
+                        rxBytesPerSec: 50_000,
+                        txBytesPerSec: 25_000,
+                    }),
+                ],
+            });
+        });
+
+        it('propagates errors from the underlying service', async () => {
+            vi.mocked(networkMetricsService.generateNetworkLoad).mockRejectedValueOnce(
+                new Error('procfs read failed')
+            );
+
+            await expect(resolver.network()).rejects.toThrow('procfs read failed');
+        });
+    });
+
+    describe('systemMetricsNetworkSubscription', () => {
+        it('delegates to the subscription helper with the NETWORK_UTILIZATION channel', async () => {
+            const subscriptionHelper = {
+                createTrackedSubscription: vi.fn().mockResolvedValue('iter'),
+            };
+
+            const testResolver = new MetricsResolver(
+                cpuService,
+                {} as CpuTopologyService,
+                memoryService,
+                networkMetricsService,
+                {} as TemperatureService,
+                { registerTopic: vi.fn() } as unknown as SubscriptionTrackerService,
+                subscriptionHelper as unknown as SubscriptionHelperService,
+                {} as ConfigService,
+                {} as TemperatureConfigService
+            );
+
+            const result = await testResolver.systemMetricsNetworkSubscription();
+
+            expect(subscriptionHelper.createTrackedSubscription).toHaveBeenCalledWith(
+                'NETWORK_UTILIZATION'
+            );
+            expect(result).toBe('iter');
+        });
+    });
+
     describe('memory', () => {
         it('should return memory utilization data', async () => {
             const result = await resolver.memory();
@@ -195,7 +270,7 @@ describe('MetricsResolver', () => {
     });
 
     describe('onModuleInit', () => {
-        it('should register CPU and memory polling topics', () => {
+        it('should register CPU, memory, network and temperature polling topics', () => {
             const subscriptionTracker = {
                 registerTopic: vi.fn(),
             };
@@ -204,6 +279,12 @@ describe('MetricsResolver', () => {
                 generateTopology: vi.fn(),
                 generateTelemetry: vi.fn().mockResolvedValue([{ id: 0, power: 42.5, temp: 68.3 }]),
             } satisfies Pick<CpuTopologyService, 'generateTopology' | 'generateTelemetry'>;
+
+            const networkMetricsServiceMock = {
+                generateNetworkLoad: vi
+                    .fn()
+                    .mockResolvedValue({ id: 'metrics/network', interfaces: [] }),
+            } satisfies Pick<NetworkMetricsService, 'generateNetworkLoad'>;
 
             const temperatureServiceMock = {
                 getMetrics: vi.fn().mockResolvedValue(null),
@@ -221,6 +302,7 @@ describe('MetricsResolver', () => {
                 cpuService,
                 cpuTopologyServiceMock as unknown as CpuTopologyService,
                 memoryService,
+                networkMetricsServiceMock as unknown as NetworkMetricsService,
                 temperatureServiceMock as unknown as TemperatureService,
                 subscriptionTracker as unknown as SubscriptionTrackerService,
                 {} as unknown as SubscriptionHelperService,
@@ -230,7 +312,8 @@ describe('MetricsResolver', () => {
 
             testModule.onModuleInit();
 
-            expect(subscriptionTracker.registerTopic).toHaveBeenCalledTimes(4);
+            // CPU + CPU_TELEMETRY + MEMORY + NETWORK + TEMPERATURE (enabled).
+            expect(subscriptionTracker.registerTopic).toHaveBeenCalledTimes(5);
             expect(subscriptionTracker.registerTopic).toHaveBeenCalledWith(
                 'CPU_UTILIZATION',
                 expect.any(Function),
@@ -241,6 +324,64 @@ describe('MetricsResolver', () => {
                 expect.any(Function),
                 2000
             );
+            expect(subscriptionTracker.registerTopic).toHaveBeenCalledWith(
+                'NETWORK_UTILIZATION',
+                expect.any(Function),
+                1000
+            );
+        });
+
+        it('publishes the network metrics payload returned by the service when the topic fires', async () => {
+            const registerTopicMock = vi.fn();
+            const subscriptionTracker = {
+                registerTopic: registerTopicMock,
+            } as unknown as SubscriptionTrackerService;
+
+            const expectedPayload = {
+                id: 'metrics/network',
+                interfaces: [
+                    {
+                        iface: 'eth0',
+                        rxBytes: 1_500_000,
+                        txBytes: 800_000,
+                        rxBytesPerSec: 50_000,
+                        txBytesPerSec: 25_000,
+                    },
+                ],
+            };
+            const networkMetricsServiceMock = {
+                generateNetworkLoad: vi.fn().mockResolvedValue(expectedPayload),
+            } as unknown as NetworkMetricsService;
+
+            const temperatureConfigServiceMock = {
+                getConfig: vi.fn().mockReturnValue({ enabled: false, polling_interval: 5000 }),
+            } as unknown as TemperatureConfigService;
+
+            const testModule = new MetricsResolver(
+                {} as CpuService,
+                {} as CpuTopologyService,
+                {} as MemoryService,
+                networkMetricsServiceMock,
+                {} as TemperatureService,
+                subscriptionTracker,
+                {} as SubscriptionHelperService,
+                {} as ConfigService,
+                temperatureConfigServiceMock
+            );
+
+            testModule.onModuleInit();
+
+            const networkCall = registerTopicMock.mock.calls.find((c) => c[0] === 'NETWORK_UTILIZATION');
+            expect(networkCall).toBeDefined();
+            // Verify the polling interval reaches /proc/net/dev once per second.
+            expect(networkCall![2]).toBe(1000);
+            const callback = networkCall![1];
+            await callback();
+
+            expect(networkMetricsServiceMock.generateNetworkLoad).toHaveBeenCalled();
+            expect(pubsub.publish).toHaveBeenCalledWith('NETWORK_UTILIZATION', {
+                systemMetricsNetwork: expectedPayload,
+            });
         });
 
         it('should skip publishing temperature metrics when payload is null', async () => {
@@ -261,6 +402,12 @@ describe('MetricsResolver', () => {
                 {} as CpuService,
                 {} as CpuTopologyService,
                 {} as MemoryService,
+                {
+                    generateNetworkLoad: vi.fn().mockResolvedValue({
+                        id: 'metrics/network',
+                        interfaces: [],
+                    }),
+                } as unknown as NetworkMetricsService,
                 temperatureServiceMock,
                 subscriptionTracker,
                 {} as SubscriptionHelperService,
@@ -304,6 +451,12 @@ describe('MetricsResolver', () => {
                 {} as CpuService,
                 {} as CpuTopologyService,
                 {} as MemoryService,
+                {
+                    generateNetworkLoad: vi.fn().mockResolvedValue({
+                        id: 'metrics/network',
+                        interfaces: [],
+                    }),
+                } as unknown as NetworkMetricsService,
                 temperatureServiceMock,
                 subscriptionTracker,
                 {} as SubscriptionHelperService,

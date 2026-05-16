@@ -11,6 +11,7 @@ import { CpuService } from '@app/unraid-api/graph/resolvers/info/cpu/cpu.service
 import { MemoryUtilization } from '@app/unraid-api/graph/resolvers/info/memory/memory.model.js';
 import { MemoryService } from '@app/unraid-api/graph/resolvers/info/memory/memory.service.js';
 import { MetricsResolver } from '@app/unraid-api/graph/resolvers/metrics/metrics.resolver.js';
+import { NetworkMetricsService } from '@app/unraid-api/graph/resolvers/metrics/network-metrics/network-metrics.service.js';
 import { TemperatureConfigService } from '@app/unraid-api/graph/resolvers/metrics/temperature/temperature-config.service.js';
 import { TemperatureService } from '@app/unraid-api/graph/resolvers/metrics/temperature/temperature.service.js';
 import { SubscriptionHelperService } from '@app/unraid-api/graph/services/subscription-helper.service.js';
@@ -29,6 +30,15 @@ describe('MetricsResolver Integration Tests', () => {
                 CpuService,
                 CpuTopologyService,
                 MemoryService,
+                {
+                    provide: NetworkMetricsService,
+                    useValue: {
+                        generateNetworkLoad: vi.fn().mockResolvedValue({
+                            id: 'metrics/network',
+                            interfaces: [],
+                        }),
+                    },
+                },
                 {
                     provide: TemperatureService,
                     useValue: {
