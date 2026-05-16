@@ -46,7 +46,10 @@ export class InfoNetwork extends Node {
     @Field(() => Boolean, { nullable: true, description: 'DHCP enabled flag' })
     dhcp?: boolean;
 
-    @Field(() => String, { nullable: true, description: 'Connection status (connected/disconnected/unknown)' })
+    @Field(() => String, {
+        nullable: true,
+        description: 'Connection status (connected/disconnected/unknown)',
+    })
     status?: string;
 
     @Field(() => String, { nullable: true, description: 'IPv4 address' })
